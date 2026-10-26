@@ -1,0 +1,2151 @@
+#!/bin/bash
+###################################################################################################################
+#   Automated Force Fields for Metals     /$$$$$$$   /$$$$$$  /$$$$$$$  /$$      /$$                              # 
+#                                        | $$__  $$ /$$__  $$| $$__  $$| $$$    /$$$                              #
+#   /$$$$$$   /$$$$$$   /$$$$$$$ /$$   /$$| $$  \ $$| $$  \ $$| $$  \ $$| $$$$  /$$$$                             #
+#  /$$__  $$ |____  $$ /$$_____/| $$  | $$| $$$$$$$/| $$$$$$$$| $$$$$$$/| $$ $$/$$ $$                             #
+# | $$$$$$$$  /$$$$$$$|  $$$$$$ | $$  | $$| $$____/ | $$__  $$| $$__  $$| $$  $$$| $$                             #
+# | $$_____/ /$$__  $$ \____  $$| $$  | $$| $$      | $$  | $$| $$  \ $$| $$\  $ | $$                             #
+# |  $$$$$$$|  $$$$$$$ /$$$$$$$/|  $$$$$$$| $$      | $$  | $$| $$  | $$| $$ \/  | $$                             #
+#  \_______/ \_______/|_______/  \____  $$|__/      |__/  |__/|__/  |__/|__/     |__/                             #
+#                               /$$  | $$                                                                         #
+#                              |  $$$$$$/              Ver. 4.20 - 1 January 2026                                 #
+#                               \______/                                                                          #
+#                                                                                                                 #
+# Developer: Abdelazim M. A. Abdelgawwad.                                                                         #
+# Institut de Ciència Molecular (ICMol), Universitat de València, P.O. Box 22085, València 46071, Spain           #
+#                                                                                                                 #
+#Distributed under the GNU LESSER GENERAL PUBLIC LICENSE Version 2.1, February 1999                               #
+#Copyright 2024 Abdelazim M. A. Abdelgawwad, Universitat de València. E-mail: abdelazim.abdelgawwad@uv.es         #
+###################################################################################################################
+
+
+# Detect the directory where the current launcher is located.
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ep2 change:
+# The launcher may be placed either in easyPARM root or in the scripts directory.
+# If a scripts/ subdirectory exists next to the launcher, use it for helper scripts.
+# Otherwise, use the launcher directory itself.
+if [ -d "$SCRIPT_ROOT/scripts" ]; then
+    SCRIPT_DIR="$SCRIPT_ROOT/scripts"
+else
+    SCRIPT_DIR="$SCRIPT_ROOT"
+fi
+
+# Get the directory from which easyPARM.sh was executed.
+# ep2 change: if no RUN_DIR argument is provided, default to the current working directory.
+RUN_DIR="${1:-$PWD}"
+
+echo " "
+echo "Running in directory: $RUN_DIR"
+echo "Script directory: $SCRIPT_DIR"
+
+# Ensure all outputs go to RUN_DIR
+cd "$RUN_DIR" || {
+    echo "Error: could not cd into RUN_DIR: $RUN_DIR"
+    exit 1
+}
+# ========================= ep2 DEBUG / SNAPSHOT SETTINGS =========================
+# ep2 change:
+#   Ask whether to keep intermediate files/snapshots unless EP2_KEEP_INTERMEDIATES
+#   was already set in the environment before launching the script.
+#
+# Usage:
+#   interactive prompt:
+#       ./easyPARM_ep2_debug_corrected.sh
+#
+#   force keep:
+#       EP2_KEEP_INTERMEDIATES=1 ./easyPARM_ep2_debug_corrected.sh <RUN_DIR>
+#
+#   force cleanup:
+#       EP2_KEEP_INTERMEDIATES=0 ./easyPARM_ep2_debug_corrected.sh <RUN_DIR>
+#
+if [ -z "${EP2_KEEP_INTERMEDIATES+x}" ]; then
+    echo " "
+    echo "==========================================="
+    echo "  ep2 Debug Snapshot Menu"
+    echo "==========================================="
+    echo "Keep intermediate snapshots for debugging?"
+    echo "This preserves files after each force-field processing stage."
+    read -r -p "Keep snapshots? (Y/n): " ep2_keep_answer
+
+    case "${ep2_keep_answer,,}" in
+        n|no)
+            EP2_KEEP_INTERMEDIATES=0
+            ;;
+        *)
+            EP2_KEEP_INTERMEDIATES=1
+            ;;
+    esac
+else
+    echo "ep2: EP2_KEEP_INTERMEDIATES already set to ${EP2_KEEP_INTERMEDIATES}"
+fi
+
+EP2_DEBUG_DIR="$RUN_DIR/ep2_debug_intermediates"
+
+if [ "$EP2_KEEP_INTERMEDIATES" -eq 1 ]; then
+    rm -rf "$EP2_DEBUG_DIR"
+    mkdir -p "$EP2_DEBUG_DIR"
+    echo "ep2 debug snapshots: $EP2_DEBUG_DIR"
+else
+    echo "ep2 debug snapshots: disabled"
+fi
+
+snapshot_ep2_stage () {
+    if [ "${EP2_KEEP_INTERMEDIATES:-0}" -ne 1 ]; then
+        return 0
+    fi
+
+    local stage="$1"
+    local outdir="$EP2_DEBUG_DIR/$stage"
+    mkdir -p "$outdir"
+
+    # Copy current relevant intermediate files. Missing globs are harmless.
+    cp -a "$RUN_DIR"/*.dat "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.frcmod "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.mol2 "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.lib "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.log "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.bak "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.out "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.fchk "$outdir/" 2>/dev/null || true
+    cp -a "$RUN_DIR"/*.chk "$outdir/" 2>/dev/null || true
+}
+
+snapshot_ep2_after_seminario () {
+    if [ "${EP2_KEEP_INTERMEDIATES:-0}" -ne 1 ]; then
+        return 0
+    fi
+
+    local stage="$1"
+    snapshot_ep2_stage "$stage"
+
+    # Preserve temp.dat under a stage-specific name because later easyPARM steps
+    # overwrite temp.dat repeatedly.
+    if [ -f "$RUN_DIR/temp.dat" ]; then
+        cp -a "$RUN_DIR/temp.dat" "$EP2_DEBUG_DIR/$stage/temp.${stage}.dat" 2>/dev/null || true
+    fi
+
+    # Preserve raw Seminario output under a stable top-level name for quick grepping.
+    if [ -f "$RUN_DIR/bond_angle_dihedral_data.dat" ]; then
+        cp -a "$RUN_DIR/bond_angle_dihedral_data.dat" "$RUN_DIR/bond_angle_dihedral_data.${stage}.dat" 2>/dev/null || true
+    fi
+}
+
+# ======================= end ep2 DEBUG / SNAPSHOT SETTINGS =======================
+
+# Remove files if it exists
+files_to_remove=("dihedral.dat" "distance.dat" "esout" "atom_type.dat" "COMPLEX_modified.mol2" "COMPLEX_modified.frcmod" \
+    "forcefield2.dat" "forcefield.dat" "metal_number.dat" "new_atomtype.dat" "temp_COMPLEX_modified.frcmod" \
+    "temp.dat" "updated_COMPLEX_modified.frcmod" "updated_COMPLEX_modified2.frcmod" "angle.dat" "bond_angle_dihedral_data.dat" "new_atomtype1.dat"\
+    "qout" "punch" "QOUT" "ATOMTYPE.INF" "leap.log" "updated_updated_COMPLEX_modified2.frcmod" "metals_complete.dat" "more_metal.dat" "new_atomtype2.dat" "REF_COMPLEX.mol2" "limited_data.dat" "line_number.dat" "ONE.mol2" "Reference_atom_type.dat" "COMPLEX.mol2" "ZEMA.mol2" "easyPARM_atomtype.dat" "COMPLEX.frcmod.bak" "COMPLEX.raw_before_update_if_needed.frcmod" "update_if_needed.log" ) 
+
+for file in "${files_to_remove[@]}"; do
+    if [ -e "$file" ]; then
+        rm -f "$file"
+    fi
+done
+
+# Function to ask the user for input again if the information provided was incorrect
+get_valid_input() {
+    local prompt="$1"
+    local valid_options="$2"
+    local user_input
+    while true; do
+        read -p "$prompt" user_input
+        # Trim any leading or trailing whitespace
+        user_input=$(echo "$user_input" | xargs)
+        
+        # Check if user_input is within valid_options (by checking exact match)
+        if [[ " $valid_options " =~ " $user_input " ]]; then
+            echo "$user_input"
+            return
+        else
+            echo "Invalid input. Please try again." >&2
+        fi
+    done
+}
+
+# Handle user's choice for Amber
+echo " "
+echo "================================="
+echo "  Amber Configuration Menu "
+echo "================================="
+echo "Select your option:"
+echo "1- Use currently loaded Amber"
+echo "2- Specify Amber installation path"
+
+while true; do
+    choice=$(get_valid_input "Enter your choice: " "1 2")
+    
+    if [ "$choice" = "1" ]; then
+        echo " "
+        echo "Amber is assumed to be already loaded. Skipping sourcing."
+        break
+    elif [ "$choice" = "2" ]; then
+        # Prompt the user for the path to Amber
+        echo " "
+        read -p "Please provide the path for Amber: " amber_path
+        
+        # Check if the provided path exists and the amber.sh file exists
+        if [ -f "${amber_path}/amber.sh" ]; then
+            # Source the Amber environment
+            source "${amber_path}/amber.sh"
+            
+            # Check if sourcing was successful
+            if [ $? -ne 0 ]; then
+                echo "Failed to source Amber. Please check the path."
+                continue
+            fi
+            echo "Amber environment sourced successfully."
+            break
+        else
+            echo "The provided path is incorrect or amber.sh is missing. Please try again."
+        fi
+    fi
+done
+
+# Function to get user input
+get_user_input() {
+    # Get total charge
+    while true; do
+	echo " "
+        read -p "Please provide the total charge: " charge_total
+        if [[ "$charge_total" =~ ^-?[0-9]+$ ]]; then
+            break
+        else
+	    echo " "
+            echo "Invalid input. Please enter an integer for the total charge."
+        fi
+    done
+
+    while true; do
+	echo " "
+        read -p "Please provide the total multiplicity: " multi_total
+        if [[ "$multi_total" =~ ^-?[1-9]+$ ]]; then
+            break
+        else
+	    echo " "
+            echo "Invalid input. Please enter an integer for the total multiplicity."
+        fi
+    done
+    # Ask the user to provide the optimized XYZ geometry file
+    while true; do
+	echo " "
+        read -p "Please provide the optimized XYZ geometry file: " xyz_file
+        if [[ ! "$xyz_file" =~ \.xyz$ ]]; then
+            echo "Error: The file must have a .xyz extension. Please try again."
+            continue
+        fi
+        if [ ! -f "$RUN_DIR/$xyz_file" ]; then
+            echo "Error: Optimized structure is not found in $RUN_DIR. Please check the file name and try again."
+            continue
+        fi
+        break
+    done
+
+    # Execute the Python script to calculate bond, angles and dihedrals
+    if [ -f "$SCRIPT_DIR/02_get_bond_angle.py" ]; then
+        python3 "$SCRIPT_DIR/02_get_bond_angle.py" "$RUN_DIR/$xyz_file"
+    else
+        echo "Script 02_get_bond_angle.py not found in $SCRIPT_DIR. Exiting."
+        exit 1
+    fi
+
+    # Check if the script was successful
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute 02_get_bond_angle.py. Exiting."
+        exit 1
+    fi
+
+    echo " "
+    echo "================================="
+    echo "  Charge Method Selection Menu "
+    echo "================================="
+    echo "Select the charge calculation method:"
+    echo "1- GAUSSIAN (RESP Charges)"
+    echo "2- ORCA (ORCA Fit Charges)"
+    echo "3- ORCA (RESP Charges)"
+    echo "4- GAMESS (RESP Charges)"
+    echo "5- GAMESS (GAMESS Fit Charges)"
+    echo "6- PSI4 (RESP Charges)"
+    #echo "7- PSI4 (OFF)"
+    charge_output=$(get_valid_input "Enter your choice: " "1 2 3 4 5 6 7")
+
+    if [ "$charge_output" -eq 1 ]; then
+        get_gaussian_input
+    elif [ "$charge_output" -eq 2 ]; then
+        get_orca_input
+    elif [ "$charge_output" -eq 3 ]; then
+        get_orca_input
+    elif [ "$charge_output" -eq 4 ]; then
+        get_gamess_input
+    elif [ "$charge_output" -eq 5 ]; then
+        get_gamess_input
+    elif [ "$charge_output" -eq 6 ]; then
+        get_psi4_input
+    elif [ "$charge_output" -eq 7 ]; then
+        get_psi4_input
+    fi
+}
+
+get_gaussian_input() {
+    # Get input format for output of gaussian
+    echo " "
+    echo "================================="
+    echo "  Charge Output Selection Menu "
+    echo "================================="
+    echo "Please select the input format:"
+    echo "1- Gaussian Output (.log file)"
+    echo "2- Resp (.gesp file)"
+    input_format=$(get_valid_input "Enter your choice: " "1 2")
+
+    # Map input format to appropriate flag
+    case $input_format in
+        1) input_form="gout";;
+        2) input_form="gesp";;
+    esac
+
+    # Get charge method
+    echo " "
+    echo "================================="
+    echo "  Charge Method Selection Menu "
+    echo "================================="
+    echo "Please select the charge method (recommended: RESP): "
+    echo "1- RESP (resp)"
+    echo "2- Mulliken (mul)"
+    echo "3- ESP (esp)"
+    echo "4- AM1-BCC (bcc)"
+    charge_method=$(get_valid_input "Enter your choice: " "1 2 3 4")
+
+    # Map charge method to appropriate flag
+    case $charge_method in
+        1) method="resp";;
+        2) method="mul";;
+        3) method="esp";;
+        4) method="bcc";;
+    esac
+
+    get_atom_type
+    run_antechamber_gaussian
+}
+
+get_orca_input() {
+    get_atom_type
+    run_antechamber_orca
+}
+
+get_gamess_input() {
+    get_atom_type
+    run_antechamber_gamess
+}
+
+get_psi4_input() {
+    get_atom_type
+    run_antechamber_psi4
+}
+
+get_atom_type() {
+    echo " "
+    echo "================================="
+    echo "  Atom Type Selection Menu "
+    echo "================================="
+    echo "Please select the atom type: "
+    echo "1- Amber Force Field (AMBER)"
+    echo "2- General Amber Force Field (GAFF)"
+    echo "3- General Amber Force Field (GAFF2)"
+    atom_type=$(get_valid_input "Enter your choice: " "1 2 3")
+
+    # Map atom type to appropriate flag
+    case $atom_type in
+        1) at_type="amber";;
+        2) at_type="gaff";;
+        3) at_type="gaff2";;
+    esac
+}
+
+run_antechamber_gaussian() {
+    while true; do
+        echo " "
+        read -p "Please provide the charge output file (e.g., .log, .gesp): " charge_data
+        
+        # Ensure the charge data file is found in RUN_DIR
+        if [ ! -f "$RUN_DIR/$charge_data" ]; then
+            echo "Charge data file not found in $RUN_DIR. Please check the file name and try again."
+            continue
+        fi
+
+        # First antechamber attempt
+        antechamber -i "$RUN_DIR/$charge_data" -fi "$input_form" -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -c "$method" -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -j 5 -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1 
+        
+	if [[ "$atom_type" -eq 2 || "$atom_type" -eq 3 ]]; then
+		
+		python3 "$SCRIPT_DIR/03_correct_mol2.py" "$RUN_DIR"
+
+		python3 "$SCRIPT_DIR/atomtype_helper.py" "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/distance_type.dat" "$RUN_DIR/COMREF.mol2" > "$RUN_DIR/temp.dat" 2>&1
+		python3 "$SCRIPT_DIR/atomtype_detector.py" "$RUN_DIR/COMREF.mol2" "$RUN_DIR/distance.dat" "$RUN_DIR/angle.dat" > "$RUN_DIR/temp.dat" 2>&1 
+		if [ -f "$RUN_DIR/easyPARM.mol2" ]; then
+			cp "$RUN_DIR/easyPARM.mol2" "$RUN_DIR/COMPLEX.mol2"
+		fi
+	fi
+	# Convert XYZ to PDB
+        python3 "$SCRIPT_DIR/xyz_to_pdb.py" "$RUN_DIR/$xyz_file" "$RUN_DIR/COMPLEX.pdb"
+        
+        # Revise Atom Type
+        python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+
+        # Additional processing steps to ensure that COMPLEX.mol2 is correct
+        if [ ! -f "$RUN_DIR/limited_data.dat" ]; then
+            if [ -f "$RUN_DIR/no_metal.dat" ]; then
+                antechamber -i "$RUN_DIR/$charge_data" -fi "$input_form" -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -c "$method" -s 2 -rn mol -nc "$charge_total" -at "$at_type" -m "$multi_total" > "$RUN_DIR/temp.dat" 2>&1
+            else
+                python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+                antechamber -i "$RUN_DIR/mol.pdb" -fi pdb -o "$RUN_DIR/ONE.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+                python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+                if [ -f "$RUN_DIR/ONE.mol2" ]; then
+                    cp "$RUN_DIR/COMPLEX_modified.mol2" "$RUN_DIR/COMPLEX.mol2"
+                fi
+        	antechamber -i "$RUN_DIR/$charge_data" -fi "$input_form" -o "$RUN_DIR/ONE2.mol2" -fo mol2 -c "$method" -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1 
+		if [ -f "$RUN_DIR/ONE2.mol2" ]; then
+                    cp "$RUN_DIR/ONE2.mol2" "$RUN_DIR/COMPLEX.mol2"
+                fi
+
+            fi
+        else 
+            break 
+        fi
+
+        # Check if COMPLEX.mol2 was generated after all attempts
+        if [ ! -f "$RUN_DIR/COMPLEX.mol2" ]; then
+            echo "  "
+	    echo "Failed to generate COMPLEX.mol2 after multiple attempts."
+	    echo -e "\n\033[0;31mPlease verify the availability of Antechamber.\033[0m"
+	    echo " " 
+            retry=$(get_valid_input "Would you like to provide a different charge output file? (y/n)" "y n")
+            case "$retry" in
+                [yY]) 
+                    echo "Retrying with a different charge output file."
+                    continue
+                    ;;
+                [nN]) 
+                    echo "Exiting due to failed antechamber command."
+                    exit 1
+                    ;;
+            esac
+        else
+            echo "Antechamber command executed successfully. "
+            break
+        fi
+    done
+}
+
+run_antechamber_orca() {
+    # Convert xyz to pdb
+    if [ -f "$SCRIPT_DIR/xyz_to_pdb.py" ]; then
+        python3 "$SCRIPT_DIR/xyz_to_pdb.py" "$RUN_DIR/$xyz_file" "$RUN_DIR/COMPLEX.pdb"
+    else
+        echo "Script xyz_to_pdb.py not found in $SCRIPT_DIR. Exiting."
+        exit 1
+    fi
+    
+    # Check if the script was successful
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute xyz_to_pdb.py. Exiting."
+        exit 1
+    fi
+    
+    # Read charge output
+    while true; do
+        echo " "
+        if [ "$charge_output" -eq 2 ]; then
+		read -p "Please provide the charge output file (e.g., .log, .out): " charge_data
+		if [[ ! "$charge_data" =~ \.(log|out)$ ]]; then
+			echo "Error: The file must have a .log or .out extension. Please try again."
+			continue
+		fi
+		if [ ! -f "$RUN_DIR/$charge_data" ]; then
+			echo "Charge data file not found in $RUN_DIR. Please check the file name and try again."
+			continue
+		fi
+	elif [ "$charge_output" -eq 3 ]; then
+		read -p "Please provide the charge output file ( .vpot): " charge_data
+		if [[ ! "$charge_data" =~ \.vpot$ ]]; then
+			echo "Error: The file must have a .vpot extension. Please try again."
+			continue
+		fi
+		if [ ! -f "$RUN_DIR/$charge_data" ]; then
+			echo "Charge data file not found in $RUN_DIR. Please check the file name and try again."
+			continue
+		fi
+
+	fi
+        break
+    done
+    
+    # First antechamber attempt
+    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no -j 5 > "$RUN_DIR/temp.dat" 2>&1
+    # Apply our approach to detect the atom type.
+    if [[ "$atom_type" -eq 2 || "$atom_type" -eq 3 ]]; then
+	    
+	    # Revise the mol2
+	    python3 "$SCRIPT_DIR/03_correct_mol2.py" "$RUN_DIR"
+	    # Update the bond section in mol2
+	    python3 "$SCRIPT_DIR/atomtype_helper.py" "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/distance_type.dat" "$RUN_DIR/COMREF.mol2" > "$RUN_DIR/temp.dat" 2>&1
+	    # Detect the atom type
+	    python3 "$SCRIPT_DIR/atomtype_detector.py" "$RUN_DIR/COMREF.mol2" "$RUN_DIR/distance.dat" "$RUN_DIR/angle.dat" > "$RUN_DIR/temp.dat" 2>&1 
+	    if [ -f "$RUN_DIR/easyPARM.mol2" ]; then
+		    cp "$RUN_DIR/easyPARM.mol2" "$RUN_DIR/COMPLEX.mol2"
+	    fi
+    fi
+    
+    # Revise Atom Type
+    python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+    
+    # Additional processing steps
+    if [ ! -f "$RUN_DIR/limited_data.dat" ]; then
+        if [ -f "$RUN_DIR/no_metal.dat" ]; then
+            antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" > "$RUN_DIR/temp.dat" 2>&1
+        else 
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            antechamber -i "$RUN_DIR/mol.pdb" -fi pdb -o "$RUN_DIR/ONE.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            if [ -f "$RUN_DIR/ONE.mol2" ]; then
+                mv "$RUN_DIR/COMPLEX_modified.mol2" "$RUN_DIR/COMPLEX.mol2"
+            fi
+	    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/ONE2.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+	    if [ -f "$RUN_DIR/ONE2.mol2" ]; then
+                    cp "$RUN_DIR/ONE2.mol2" "$RUN_DIR/COMPLEX.mol2"
+            fi
+        fi
+    else 
+        break 
+    fi
+    
+    # Check if COMPLEX.mol2 was generated after all attempts
+    if [ ! -f "$RUN_DIR/COMPLEX.mol2" ]; then
+        echo " "
+	echo "Failed to generate COMPLEX.mol2 after multiple attempts."
+	echo -e "\n\033[0;31mPlease verify the availability of Antechamber.\033[0m"
+	echo " " 
+        retry=$(get_valid_input "Would you like to provide a different charge output file? (y/n)" "y n")
+        case "$retry" in
+            [yY]) 
+                echo "Retrying with a different charge output file..."
+                run_antechamber_orca
+                return
+                ;;
+            [nN]) 
+                echo "Exiting due to failed antechamber command."
+                exit 1
+                ;;
+        esac
+    else
+        echo "Antechamber command executed successfully. "
+    fi
+
+    # Update mol2 file with CHELPG charges (if selected)
+    if [ "$charge_output" -eq 2 ]; then
+        awk '/ Charges/,/Total charge:/' "$RUN_DIR/$charge_data" | \
+            grep -E '^\s*[0-9]+' | \
+            awk '{print $NF}' > "$RUN_DIR/charges.dat"
+        cp "$RUN_DIR/charges.dat" "$RUN_DIR/charges.chg"
+       	python3 "$SCRIPT_DIR/Retrieve_RESP_Charges.py"
+    
+    fi
+}
+run_antechamber_gamess() {
+    # Convert xyz to pdb
+    if [ -f "$SCRIPT_DIR/xyz_to_pdb.py" ]; then
+        python3 "$SCRIPT_DIR/xyz_to_pdb.py" "$RUN_DIR/$xyz_file" "$RUN_DIR/COMPLEX.pdb"
+    else
+        echo "Script xyz_to_pdb.py not found in $SCRIPT_DIR. Exiting."
+        exit 1
+    fi
+    
+    # Check if the script was successful
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute xyz_to_pdb.py. Exiting."
+        exit 1
+    fi
+    
+    # Read charge output
+    while true; do
+	echo " "
+        if [ "$charge_output" -eq 4 ]; then
+		read -p "Please provide the charge output file ( .dat): " charge_data
+		if [[ ! "$charge_data" =~ \.dat$ ]]; then
+			echo "Error: The file must have a .dat extension. Please try again."
+			continue
+		fi
+		if [ ! -f "$RUN_DIR/$charge_data" ]; then
+			echo "Charge data file not found in $RUN_DIR. Please check the file name and try again."
+			continue
+		fi
+	elif [ "$charge_output" -eq 5 ]; then
+		read -p "Please provide the charge output file ( .log): " charge_data
+		if [[ ! "$charge_data" =~ \.log$ ]]; then
+			echo "Error: The file must have a .log extension. Please try again."
+			continue
+		fi
+		if [ ! -f "$RUN_DIR/$charge_data" ]; then
+			echo "Charge data file not found in $RUN_DIR. Please check the file name and try again."
+			continue
+		fi
+
+	fi
+        break
+    done
+ 
+    # First antechamber attempt
+    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -at "$at_type" -m "$multi_total" -dr no -j 5 > "$RUN_DIR/temp.dat" 2>&1
+    
+    # Apply our approach to detect the atom type.
+    if [[ "$atom_type" -eq 2 || "$atom_type" -eq 3 ]]; then
+
+	    # Revise the mol2
+	    python3 "$SCRIPT_DIR/03_correct_mol2.py" "$RUN_DIR"
+	    # 
+	    python3 "$SCRIPT_DIR/atomtype_helper.py" "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/distance_type.dat" "$RUN_DIR/ZEMA.mol2" > "$RUN_DIR/temp.dat" 2>&1
+	    python3 "$SCRIPT_DIR/atomtype_detector.py" "$RUN_DIR/ZEMA.mol2" "$RUN_DIR/distance.dat" "$RUN_DIR/angle.dat" > "$RUN_DIR/temp.dat" 2>&1 
+	    if [ -f "$RUN_DIR/easyPARM.mol2" ]; then
+		    mv "$RUN_DIR/easyPARM.mol2" "$RUN_DIR/COMPLEX.mol2"
+	    fi
+    fi
+      
+    # Revise Atom Type
+    python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+    
+    # Additional processing steps
+    if [ ! -f "$RUN_DIR/limited_data.dat" ]; then
+        if [ -f "$RUN_DIR/no_metal.dat" ]; then
+            antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -s 2 -rn mol -m "$multi_total" -nc "$charge_total" -at "$at_type" > "$RUN_DIR/temp.dat" 2>&1
+        else 
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            antechamber -i "$RUN_DIR/mol.pdb" -fi pdb -o "$RUN_DIR/ONE.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            if [ -f "$RUN_DIR/ONE.mol2" ]; then
+                mv "$RUN_DIR/COMPLEX_modified.mol2" "$RUN_DIR/COMPLEX.mol2"
+            fi
+	    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/ONE2.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+	    if [ -f "$RUN_DIR/ONE2.mol2" ]; then
+                    cp "$RUN_DIR/ONE2.mol2" "$RUN_DIR/COMPLEX.mol2"
+            fi
+        fi
+    else 
+        break 
+    fi
+    
+    # Check if COMPLEX.mol2 was generated after all attempts
+    if [ ! -f "$RUN_DIR/COMPLEX.mol2" ]; then
+        echo " "
+	echo "Failed to generate COMPLEX.mol2 after multiple attempts. "
+	echo -e "\n\033[0;31mPlease verify the availability of Antechamber.\033[0m"
+	echo " " 
+
+        retry=$(get_valid_input "Would you like to provide a different charge output file? (y/n)" "y n")
+        case "$retry" in
+            [yY]) 
+                echo "Retrying with a different charge output file..."
+                run_antechamber_orca
+                return
+                ;;
+            [nN]) 
+                echo "Exiting due to failed antechamber command."
+                exit 1
+                ;;
+        esac
+    else
+        echo "Antechamber command executed successfully. "
+    fi
+    
+    # Update mol2 file with gamess charges (if selected)
+    if [ "$charge_output" -eq 5 ]; then
+	awk '/NET CHARGES:/,/RMS DEVIATION IS/ {
+		if ($1 ~ /^[A-Z]/ && $3 ~ /^-?[0-9]/)
+    			print $2
+	}' "$RUN_DIR/$charge_data" > "$RUN_DIR/charges.dat"
+        cp "$RUN_DIR/charges.dat" "$RUN_DIR/charges.chg"
+       	python3 "$SCRIPT_DIR/Retrieve_RESP_Charges.py"
+    fi
+
+}
+
+run_antechamber_psi4() {
+    
+     if [ "$charge_output" -eq 6 ]; then  
+	    if [ -f "$SCRIPT_DIR/PSI4.py" ]; then
+		python3 "$SCRIPT_DIR/PSI4.py"
+
+	    else
+		echo "Script PSI4.py not found in $SCRIPT_DIR. Exiting."
+		exit 1
+	    fi
+    fi
+
+    # Convert xyz to pdb
+    cp "$RUN_DIR/optimized.xyz" "$RUN_DIR/COMPLEX.xyz"
+    if [ -f "$SCRIPT_DIR/xyz_to_pdb.py" ]; then
+        python3 "$SCRIPT_DIR/xyz_to_pdb.py" "$RUN_DIR/COMPLEX.xyz" "$RUN_DIR/COMPLEX.pdb"
+    else
+        echo "Script xyz_to_pdb.py not found in $SCRIPT_DIR. Exiting."
+        exit 1
+    fi
+    
+    # Check if the script was successful
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute xyz_to_pdb.py. Exiting."
+        exit 1
+    fi
+     
+    # First antechamber attempt
+    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -at "$at_type" -m "$multi_total" -dr no -j 5 > "$RUN_DIR/temp.dat" 2>&1
+    
+    # Apply our approach to detect the atom type.
+    if [[ "$atom_type" -eq 2 || "$atom_type" -eq 3 ]]; then
+
+	    # Revise the mol2
+	    python3 "$SCRIPT_DIR/03_correct_mol2.py" "$RUN_DIR"
+	    # 
+	    python3 "$SCRIPT_DIR/atomtype_helper.py" "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/distance_type.dat" "$RUN_DIR/ZEMA.mol2" > "$RUN_DIR/temp.dat" 2>&1
+	    python3 "$SCRIPT_DIR/atomtype_detector.py" "$RUN_DIR/ZEMA.mol2" "$RUN_DIR/distance.dat" "$RUN_DIR/angle.dat" > "$RUN_DIR/temp.dat" 2>&1 
+	    if [ -f "$RUN_DIR/easyPARM.mol2" ]; then
+		    mv "$RUN_DIR/easyPARM.mol2" "$RUN_DIR/COMPLEX.mol2"
+	    fi
+    fi
+      
+    # Revise Atom Type
+    python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+    
+    # Additional processing steps
+    if [ ! -f "$RUN_DIR/limited_data.dat" ]; then
+        if [ -f "$RUN_DIR/no_metal.dat" ]; then
+            antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/COMPLEX.mol2" -fo mol2 -s 2 -rn mol -m "$multi_total" -nc "$charge_total" -at "$at_type" > "$RUN_DIR/temp.dat" 2>&1
+        else 
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            antechamber -i "$RUN_DIR/mol.pdb" -fi pdb -o "$RUN_DIR/ONE.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            if [ -f "$RUN_DIR/ONE.mol2" ]; then
+                mv "$RUN_DIR/COMPLEX_modified.mol2" "$RUN_DIR/COMPLEX.mol2"
+            fi
+	    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/ONE2.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+	    if [ -f "$RUN_DIR/ONE2.mol2" ]; then
+		    cp "$RUN_DIR/ONE2.mol2" "$RUN_DIR/COMPLEX.mol2"
+            fi
+        fi
+    else 
+        break 
+    fi
+    
+    # Check if COMPLEX.mol2 was generated after all attempts
+    if [ ! -f "$RUN_DIR/COMPLEX.mol2" ]; then
+        echo " "
+	echo "Failed to generate COMPLEX.mol2 after multiple attempts. "
+	echo -e "\n\033[0;31mPlease verify the availability of Antechamber.\033[0m"
+	echo " " 
+
+        retry=$(get_valid_input "Would you like to provide a different charge output file? (y/n)" "y n")
+        case "$retry" in
+            [yY]) 
+                echo "Retrying with a different charge output file..."
+                run_antechamber_orca
+                return
+                ;;
+            [nN]) 
+                echo "Exiting due to failed antechamber command."
+                exit 1
+                ;;
+        esac
+    else
+        echo "Antechamber command executed successfully. "
+    fi
+    
+    # Update mol2 file with PSI4 charges
+    if [[ "$charge_output" -eq 6 || "$charge_output" -eq 7 ]]; then
+	awk '{print $3}' "$RUN_DIR/resp_charges.dat" > "$RUN_DIR/charges.dat"
+        cp "$RUN_DIR/charges.dat" "$RUN_DIR/charges.chg"
+       	python3 "$SCRIPT_DIR/Retrieve_RESP_Charges.py"
+    fi
+
+}
+
+# Main execution
+get_user_input
+
+# Ask the user for the input file
+echo " "
+echo "==========================================="
+echo "  Frequencies Format Selection Menu "
+echo "==========================================="
+echo "Please select the format you will provide:"
+echo "1- Orca Output"
+echo "2- Gaussian Output"
+echo "3- Gaussian Checkpoint"
+echo "4- Gaussian Formatted Checkpoint"
+echo "5- Gamess Output"
+echo "6- PSI4 Output"
+
+qm_output=$(get_valid_input "Enter your choice: " "1 2 3 4 5 6")
+
+case $qm_output in
+    1)
+        echo " "
+	echo "You've selected Orca Output"
+	if [ "$charge_output" -eq 1 -o "$charge_output" -eq 3 -o "$charge_output" -eq 4 -o "$charge_output" -eq 5 ]; then
+            while true; do
+                echo " "
+                read -p "Please provide the Orca output file (.log or .out): " orca_output
+                if [ ! -f "$RUN_DIR/$orca_output" ]; then
+                    echo "Orca output file not found in $RUN_DIR. Please check the file name and try again."
+                    continue
+                fi
+                break
+            done
+            while true; do
+                echo " "
+                read -p "Please provide the Orca hessian file (.hess): " orca_hessian
+                if [ ! -f "$RUN_DIR/$orca_hessian" ]; then
+                    echo "Orca hessian file not found in $RUN_DIR. Please check the file name and try again."
+                    continue
+                fi
+                break
+            done
+            python3 "$SCRIPT_DIR/Seminario_method_ORCA.py" "$RUN_DIR/$orca_hessian" "$RUN_DIR/$orca_output" > "$RUN_DIR/temp.dat"
+	    
+	    if [ $? -ne 0 ]; then
+		    echo "Failed to execute Seminario_method_ORCA.py. Exiting."
+		    echo -e "\n\033[0;31mPlease check the output.\033[0m"
+
+		    exit 1
+	    fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_ORCA"
+
+        elif [ "$charge_output" -eq 2 ]; then
+            while true; do
+                echo " "
+                read -p "Please provide the Orca hessian file (.hess): " orca_hessian
+                if [ ! -f "$RUN_DIR/$orca_hessian" ]; then
+                    echo "Orca hessian file not found in $RUN_DIR. Please check the file name and try again."
+                    continue
+                fi
+                break
+            done
+            python3 "$SCRIPT_DIR/Seminario_method_ORCA.py" "$RUN_DIR/$orca_hessian" "$RUN_DIR/$charge_data" > "$RUN_DIR/temp.dat"
+	    if [ $? -ne 0 ]; then
+		    echo "Failed to execute Seminario_method_ORCA.py. Exiting."
+		    echo -e "\n\033Please verify the following:\033[0m"
+		    echo -e "  1. Check if the calculation terminated correctly"
+		    echo -e "  2. Verify frequency calculation completed separately"
+
+		    exit 1
+	    fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_ORCA_charge_data"
+        fi
+        ;;
+    2)
+        echo " "
+        echo "You've selected Gaussian output"
+        while true; do
+            echo " "
+            read -p "Please provide the Gaussian frequency calculation output file (.log or .out): " gaussian_output
+            if [ ! -f "$RUN_DIR/$gaussian_output" ]; then
+                echo "Gaussian output file not found in $RUN_DIR. Please check the file name and try again."
+                continue
+            fi
+            break
+        done
+        # Execute the Seminario method to calculate bond, angle, and force constant parameters.
+        python3 "$SCRIPT_DIR/Seminario_method_GAUSSIAN_ep2_xyzviewer_jama.py" "$RUN_DIR/$gaussian_output" 2 > "$RUN_DIR/temp.dat"
+        if [ $? -ne 0 ]; then
+            echo "Failed to execute Seminario_method_GAUSSIAN_ep2_xyzviewer_jama.py. Exiting."
+	    echo -e "\n\033Please verify the following:\033[0m"
+	    echo -e "  1. Check if the calculation terminated correctly"
+	    echo -e "  2. Verify frequency calculation completed separately"
+	    echo -e "     → Ensure freq=noraman or freq job finished successfully"
+	    echo -e "  3. Verify the iop(7/33=1) was included in the input"
+            exit 1
+        fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_GAUSSIAN_output"
+        ;;
+    3)
+        echo " "
+        echo "You've selected Gaussian checkpoint"
+        while true; do
+            echo " "
+            read -p "Please provide the checkpoint file (.chk): " checkpoint
+            if [[ ! "$checkpoint" =~ \.chk$ ]]; then
+                echo "Error: The file must have a .chk extension. Please try again."
+                continue
+            fi
+            if [ ! -f "$RUN_DIR/$checkpoint" ]; then
+                echo "Error: Checkpoint file not found in $RUN_DIR. Please check the file name and try again."
+                continue
+            fi
+            break
+        done
+        echo " "
+        echo "================================="
+        echo "  Gaussian Selection Menu "
+        echo "================================="
+        echo "1- Gaussian is already loaded (formchk is available)"
+        echo "2- Provide the Gaussian path"
+        gauss_choice=$(get_valid_input "Enter your choice: " "1 2")
+
+        if [ "$gauss_choice" -eq 1 ]; then
+            formchk_command="formchk"
+        elif [ "$gauss_choice" -eq 2 ]; then
+            while true; do
+                read -p "Please provide the path for Gaussian: " gauss_path
+                formchk_path=$(find "$gauss_path" -type f -name "formchk" 2>/dev/null | head -n 1)
+                if [ -z "$formchk_path" ]; then
+                    echo "Error: Failed to find formchk in the provided path. Please check the path and try again."
+                    continue
+                fi
+                formchk_command="$formchk_path"
+                break
+            done
+        fi
+
+        # Run formchk
+        if ! $formchk_command "$RUN_DIR/$checkpoint" "$RUN_DIR/complex.fchk" > "$RUN_DIR/temp.dat" 2>&1; then
+            echo "Error: formchk command failed. Please check the input and try again."
+            exit 1
+        fi
+        # Execute the Seminario method to calculate bond, angle, and force constant parameters.
+        python3 "$SCRIPT_DIR/Seminario_method_GAUSSIAN_ep2_xyzviewer_jama.py" "$RUN_DIR/complex.fchk" 3 > "$RUN_DIR/temp.dat"
+        if [ $? -ne 0 ]; then
+            echo "Failed to execute Seminario_method_GAUSSIAN_ep2_xyzviewer_jama.py. Exiting."
+	    echo -e "\n\033Please verify the following:\033[0m"
+	    echo -e "  1. Check if the calculation terminated correctly"
+	    echo -e "  2. Verify frequency calculation completed separately"
+	    echo -e "     → Ensure freq=noraman or freq job finished successfully"
+	    echo -e "  3. Chk was generated only by Gaussian"
+            exit 1
+        fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_GAUSSIAN_chk"
+        ;;
+    4)
+        echo " "
+        echo "You've selected Gaussian formatted checkpoint"
+        while true; do
+            echo " "
+            read -p "Please provide the formatted checkpoint file (.fchk): " fchk_file
+            # Validation for .fchk file
+            if [[ ! "$fchk_file" =~ \.fchk$ ]]; then
+                echo "Error: The file must have a .fchk extension. Please try again."
+                continue
+            fi
+            if [ ! -f "$RUN_DIR/$fchk_file" ]; then
+                echo "Error: Formatted checkpoint file not found in $RUN_DIR. Please check the file name and try again."
+                continue
+            fi
+            break
+        done
+        cp "$RUN_DIR/$fchk_file" "$RUN_DIR/temp.fchk"
+        mv "$RUN_DIR/temp.fchk" "$RUN_DIR/complex.fchk"
+        # Execute the Seminario method to calculate bond, angle, and force constant parameters.
+        python3 "$SCRIPT_DIR/Seminario_method_GAUSSIAN_ep2_xyzviewer_jama.py" "$RUN_DIR/complex.fchk" 4 > "$RUN_DIR/temp.dat"
+        if [ $? -ne 0 ]; then
+            echo "Failed to execute Seminario_method_GAUSSIAN_ep2_xyzviewer_jama.py. Exiting."
+	    echo -e "\n\033Please verify the following:\033[0m"
+	    echo -e "  1. Check if the calculation terminated correctly"
+	    echo -e "  2. Verify frequency calculation completed separately"
+	    echo -e "     → Ensure freq=noraman or freq job finished successfully"
+	    echo -e "  3. fchk was generated by formchk tool from gaussian"
+            exit 1
+        fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_GAUSSIAN_fchk"
+        ;;
+    5)
+        echo " "
+        echo "You've selected Gamess output"
+        while true; do
+            echo " "
+            read -p "Please provide the Gamess output file ( .dat): " gamess_output
+            if [ ! -f "$RUN_DIR/$gamess_output" ]; then
+                echo "Gaussian output file not found in $RUN_DIR. Please check the file name and try again."
+                continue
+            fi
+            break
+        done
+        # Execute the Seminario method to calculate bond, angle, and force constant parameters.
+        python3 "$SCRIPT_DIR/Seminario_method_GAMESS.py" "$RUN_DIR/$gamess_output" > "$RUN_DIR/temp.dat"
+        if [ $? -ne 0 ]; then
+            echo "Failed to execute Seminario_method_GAMESS.py. Exiting."
+	    echo -e "\n\033Please verify the following:\033[0m"
+	    echo -e "  1. Check if the calculation terminated correctly"
+	    echo -e "  2. Verify frequency calculation completed separately"
+            exit 1
+        fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_GAMESS"
+        ;;
+    6)
+        echo " "
+        echo "You've selected PSI4 output"
+        # Execute the Seminario method to calculate bond, angle, and force constant parameters.
+        python3 "$SCRIPT_DIR/Seminario_method_PSI4.py" "$RUN_DIR/hessian.txt" "$RUN_DIR/optimized.xyz" "$RUN_DIR/resp_charges.dat" > "$RUN_DIR/temp.dat"
+        if [ $? -ne 0 ]; then
+            echo "Failed to execute Seminario_method_PSI4.py. Exiting."
+	    echo -e "\n\033[0;31mPlease check the output message.\033[0m"
+            exit 1
+        fi
+
+        # ep2 debug:
+        # Preserve raw Hessian-derived output immediately after Seminario calculation,
+        # before atom-type mapping, averaging, cleaning, or later temp.dat overwrites.
+        snapshot_ep2_after_seminario "00_after_Seminario_PSI4"
+        ;;
+
+esac
+    
+if [ "$charge_output" -eq 3 ]; then
+        # For ORCA vpot file, simply copy the file
+        cp "$RUN_DIR/$charge_data" "$RUN_DIR/esp.in"
+	# Read the first line, remove the space, and store it
+        first_line=$(sed '1q;d' "$RUN_DIR/esp.in" | sed -E 's/^([[:space:]]+)([0-9]+)[[:space:]]+([0-9]+)/\1\2\3/')
+	# Replace the first line in the file
+        sed -i'' "1s/.*/$first_line/" "$RUN_DIR/esp.in"
+        # Generate the required input for resp calculation  
+	python3 "$SCRIPT_DIR/RESP_ORCA.py" "$RUN_DIR/$orca_hessian" $charge_total "$RUN_DIR/similar.dat" > "$RUN_DIR/temp.dat"
+	# Run resp 
+    	resp -O -i resp.in -o resp.out -e esp.in -t esp.chg
+	# reshape charges
+        awk '{for (i=1; i<=NF; i++) print $i}' "$RUN_DIR/esp.chg" > "$RUN_DIR/charges.chg"
+	# update mol2 charges
+        python3 "$SCRIPT_DIR/Retrieve_RESP_Charges.py"
+elif [ "$charge_output" -eq 4 ]; then
+        python3 "$SCRIPT_DIR/RESP_GAMESS.py" "$RUN_DIR/$charge_data" $charge_total "$RUN_DIR/similar.dat" > "$RUN_DIR/temp.dat"
+    	resp -O -i resp.in -o resp.out -e esp.in -t esp.chg
+	# reshape charges
+        awk '{for (i=1; i<=NF; i++) print $i}' "$RUN_DIR/esp.chg" > "$RUN_DIR/charges.chg"
+	# update mol2 charges
+        python3 "$SCRIPT_DIR/Retrieve_RESP_Charges.py"
+fi
+
+#Remove unnecessary file
+if [  -f "$RUN_DIR/metals_complete.dat" ]; then
+    rm "$RUN_DIR/metals_complete.dat" 
+fi
+
+# Run the Python and shell scripts in sequence with checks
+# Generate a .mol2 file
+# Correct the .mol2 file
+# Generate a .frcmod file
+# Assign new atom types in the .mol2 and .frcmod file
+for script in 03_correct_mol2.py correct_atom_type.py 04_parmch2_frcmod.sh; do
+    if [[ $script == *.py ]]; then
+        if [ -f "$SCRIPT_DIR/$script" ]; then
+            python3 "$SCRIPT_DIR/$script" "$RUN_DIR"
+	    if [  -f "$RUN_DIR/COMPLEX_modified_atom_type.mol2" ]; then
+		    mv "$RUN_DIR/COMPLEX_modified_atom_type.mol2" "$RUN_DIR/COMPLEX.mol2"
+	    fi
+
+            if [ $? -ne 0 ]; then
+                echo "Failed to execute $script. Exiting."
+                exit 1
+            fi
+        else
+            echo "Script $script not found in $SCRIPT_DIR. Exiting."
+            exit 1
+        fi
+    elif [[ $script == *.sh ]]; then
+        if [ -f "$SCRIPT_DIR/$script" ]; then
+            bash "$SCRIPT_DIR/$script" "$RUN_DIR" "$atom_type"
+            if [ $? -ne 0 ]; then
+                echo "Failed to execute $script. Exiting."
+                exit 1
+            fi
+        else
+            echo "Script $script not found in $SCRIPT_DIR. Exiting."
+            exit 1
+        fi
+    fi
+done
+
+echo " "
+
+# Function to process metallonucleic with selected force field
+process_metallonucleic() {
+    local nucleic_ff=$1
+    
+    if [ ! -f "$SCRIPT_DIR/metallonucleic.py" ]; then
+        echo "Error: metallonucleic.py not found in $SCRIPT_DIR" >&2
+        return 1
+    fi
+    
+    case "$nucleic_ff" in
+        1) lib_file="DNA_BSC0.lib" ;;
+        2) lib_file="DNA_BSC1.lib" ;;
+        3) lib_file="DNA_OL15.lib" ;;
+        4) lib_file="DNA_OL21.lib" ;;
+        5) lib_file="DNA_OL24.lib" ;;
+        6) lib_file="RNA_OL3.lib" ;;
+        *) 
+            echo "Error: Invalid nucleic force field selection: $nucleic_ff" >&2
+            echo "Valid options are 1-6" >&2
+            return 1
+            ;;
+    esac
+    
+    python3 "$SCRIPT_DIR/metallonucleic.py" "$SCRIPT_DIR/libraries/$lib_file"
+    mv "$RUN_DIR/COMPLEX_updated.mol2" "$RUN_DIR/easyCOMPLEX.mol2"
+}
+
+# Function to process metalloprotein with selected force field
+process_metalloprotein() {
+    local protein_ff=$1
+
+    if [ ! -f "$SCRIPT_DIR/metalloprotein.py" ]; then
+        echo "Error: metalloprotein.py not found in $SCRIPT_DIR" >&2
+        return 1
+    fi
+
+    case "$protein_ff" in
+        1) lib_file="fb15.lib" ;;
+        2) lib_file="ff12SB.lib" ;;
+        3) lib_file="ff14SB.lib" ;;
+        4) lib_file="ff19SB.lib" ;;
+        *)
+            echo "Error: Invalid protein force field selection: $protein_ff" >&2
+            echo "Valid options are 1-4" >&2
+            return 1
+            ;;
+    esac
+
+    python3 "$SCRIPT_DIR/metalloprotein.py" "$SCRIPT_DIR/libraries/$lib_file"
+    mv "$RUN_DIR/COMPLEX_updated.mol2" "$RUN_DIR/easyCOMPLEX.mol2"
+}
+
+metalloprotein_choice=$(get_valid_input "Does your structure belong to MetalloProtein ? (y/n): " "y n yes no Y N YES NO Yes No")
+echo " "
+metallonucleic_choice=$(get_valid_input "Does your structure belong to Metallonucleic acid ? (y/n): " "y n yes no Y N YES NO Yes No")
+
+if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]] || [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+
+    echo " "
+    while true; do
+    
+    	cp "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/NEW_COMPLEX.mol2" 
+    	if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+		
+		read -p "Please provide the metalloprotein pdb file: " protein_pdb
+	        
+		echo " "
+		echo "======================================================"
+		echo "        Protein Force Field Integration Menu"
+		echo "======================================================"
+		echo "Select the protein FF to be used for the metal-coordinated standard amino-acid residues"
+		echo " "
+		echo "1- fb15"
+		echo "2- ff12SB "
+		echo "3- ff14SB"
+		echo "4- ff19SB"
+		echo " "
+		protein_ff=$(get_valid_input "Enter your choice: " "1 2 3 4")
+
+		if [ ! -f "$RUN_DIR/$protein_pdb" ]; then
+		    echo "Metalloprotein file not found in $RUN_DIR. Please check the file name and try again."
+		    continue
+		fi
+
+		pdb4amber -i "$RUN_DIR/$protein_pdb" -o "$RUN_DIR/metalloprotein_easyPARM.pdb"  > "$RUN_DIR/temp.dat" 2>&1 
+		if [ -f "$SCRIPT_DIR/metalloprotein.py" ]; then
+			process_metalloprotein "$protein_ff"
+		else
+			echo "Script metalloprotein.py not found in $SCRIPT_DIR. Exiting."
+			exit 1
+		fi
+
+		# Check if the script was successful
+		if [ $? -ne 0 ]; then
+			echo "Failed to execute metalloprotein.py. Exiting."
+			exit 1
+		fi
+    	fi
+    	
+	if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+		read -p "Please provide the metallonucleic acid pdb file: " nucleic_pdb
+	        echo " "
+		echo "======================================================"
+		echo "        DNA/RNA Force Field Integration Menu"
+		echo "======================================================"
+		echo "Select the DNA/RNA FF to be used for the metal-coordinated standard nucleobase residues"
+		echo " "
+		echo "1- DNA-BSC0"
+		echo "2- DNA-BSC1"
+		echo "3- DNA-OL15"
+		echo "4- DNA-OL21"
+		echo "5- DNA-OL24"
+		echo "6- RNA-OL3"
+		echo " "
+		nucleic_ff=$(get_valid_input "Enter your choice: " "1 2 3 4 5 6")
+		if [ ! -f "$RUN_DIR/$nucleic_pdb" ]; then
+		    echo "Metallonucleic acid file not found in $RUN_DIR. Please check the file name and try again."
+		    continue
+		fi
+
+		pdb4amber -i "$RUN_DIR/$nucleic_pdb" -o "$RUN_DIR/nucleic_acid_easyPARM.pdb"  > "$RUN_DIR/temp.dat" 2>&1 
+		if [ -f "$SCRIPT_DIR/metallonucleic.py" ]; then
+			process_metallonucleic "$nucleic_ff" 
+		else
+			echo "Script metallonucleic.py not found in $SCRIPT_DIR. Exiting."
+			exit 1
+		fi
+
+		# Check if the script was successful
+		if [ $? -ne 0 ]; then
+			echo "Failed to execute metallonucleic.py. Exiting."
+			exit 1
+		fi
+    	fi
+    	
+	mv "$RUN_DIR/easyCOMPLEX.mol2" "$RUN_DIR/COMPLEX_modified.mol2" 
+    	
+    	if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+	python3 "$SCRIPT_DIR/distribute_metalloprotein_charge.py" "$RUN_DIR/$protein_pdb" "$RUN_DIR/COMPLEX_modified.mol2" $charge_total 
+	fi 
+    	
+	if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+	python3 "$SCRIPT_DIR/distribute_metallonucleic_charge.py" "$RUN_DIR/$nucleic_pdb" "$RUN_DIR/COMPLEX_modified.mol2" $charge_total 
+	fi 
+    	
+	mv "$RUN_DIR/updated_easy_COMPLEX.mol2" "$RUN_DIR/COMPLEX_modified.mol2" 
+    	break
+    done
+else
+	if [ -f "$RUN_DIR/COMPLEX.lib" ]; then
+		rm "$RUN_DIR/COMPLEX.lib"
+    	fi
+    
+fi
+
+# Select appropriate preparation script in order to generate the frcmod depend on the complexation of the system
+# more_metal.dat refer that there are more than metal or non standard atom then the code will select the code depend on that
+if [ -f "$RUN_DIR/more_metal.dat" ]; then
+
+    python3 "$SCRIPT_DIR/05_prepare_mol2_frcmod_more_atom.py" "$RUN_DIR"
+    cp "$RUN_DIR/new_atomtype.dat" "$RUN_DIR/new_atomtype1.dat"    
+    cp "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/REF_COMPLEX.mol2"    
+    cp "$RUN_DIR/NEW_COMPLEX.mol2" "$RUN_DIR/COMPLEX.mol2"    
+    mv "$RUN_DIR/metal_number.dat" "$RUN_DIR/metals_complete.dat"
+    rm "$RUN_DIR/more_metal.dat"
+    python3 "$SCRIPT_DIR/generate_preforcefield.py" "$RUN_DIR"
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute 05_prepare_mol2_frcmod_more_atom.py. Exiting."
+        exit 1
+    fi
+fi
+
+if [ ! -f "$RUN_DIR/more_metal.dat" ]; then
+    python3 "$SCRIPT_DIR/05_prepare_mol2_frcmod.py" "$RUN_DIR"
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute 05_prepare_mol2_frcmod.py. Exiting."
+        exit 1
+    fi
+fi
+
+if [  -f "$RUN_DIR/metals_complete.dat" ]; then
+    cp "$RUN_DIR/metals_complete.dat" "$RUN_DIR/metal_number.dat"
+fi
+
+if [  -f "$RUN_DIR/new_atomtype1.dat" ]; then
+    cp "$RUN_DIR/new_atomtype.dat" "$RUN_DIR/new_atomtype2.dat"    
+    cp "$RUN_DIR/REF_COMPLEX.mol2" "$RUN_DIR/COMPLEX.mol2"
+    cat "$RUN_DIR/new_atomtype1.dat" >> "$RUN_DIR/new_atomtype2.dat"
+fi
+
+
+echo " "
+if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]] || [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+
+	cp "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/1COMPLEX.mol2"
+	if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+		if [ -f "$SCRIPT_DIR/metalloprotein.py" ]; then
+			process_metalloprotein "$protein_ff"
+		else
+			echo "Script metalloprotein.py not found in $SCRIPT_DIR. Exiting."
+			exit 1
+		fi
+
+		# Check if the script was successful
+		if [ $? -ne 0 ]; then
+			echo "Failed to execute metalloprotein.py. Exiting."
+			exit 1
+		fi
+	fi
+
+	if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+		if [ -f "$SCRIPT_DIR/metallonucleic.py" ]; then
+			process_metallonucleic "$nucleic_ff"
+		else
+			echo "Script metallonucleic.py not found in $SCRIPT_DIR. Exiting."
+			exit 1
+		fi
+
+		# Check if the script was successful
+		if [ $? -ne 0 ]; then
+			echo "Failed to execute metallonucleic.py. Exiting."
+			exit 1
+		fi
+	fi
+
+	python3 "$SCRIPT_DIR/xyz_to_pdb.py" "$RUN_DIR/part_QM.xyz" "$RUN_DIR/part_QM.pdb"
+	python3 "$SCRIPT_DIR/xyz_to_pdb.py" "$RUN_DIR/qm.xyz" "$RUN_DIR/qm.pdb"
+
+	antechamber -i "$RUN_DIR/qm.pdb" -fi pdb -o "$RUN_DIR/QM.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no -j 5 > "$RUN_DIR/temp.dat" 2>&1
+	cp "$RUN_DIR/COMPLEX.pdb" "$RUN_DIR/backupCOMPLEX.pdb"
+	cp "$RUN_DIR/qm.pdb" "$RUN_DIR/COMPLEX.pdb"
+	cp "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/backupCOMPLEX.mol2"
+	cp "$RUN_DIR/QM.mol2" "$RUN_DIR/COMPLEX.mol2"
+	
+	if [ -f "$RUN_DIR/limited_data.dat" ]; then
+		rm -f "$RUN_DIR/limited_data.dat" 
+	fi
+    
+	if [ -f "$RUN_DIR/line_number.dat" ]; then
+		rm -f "$RUN_DIR/line_number.dat" 
+	fi
+	
+	python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+	if [ ! -f "$RUN_DIR/limited_data.dat" ]; then
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            antechamber -i "$RUN_DIR/mol.pdb" -fi pdb -o "$RUN_DIR/ONE.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+            python3 "$SCRIPT_DIR/Revise_Atom_Type.py" > "$RUN_DIR/temp.dat"
+            if [ -f "$RUN_DIR/ONE.mol2" ]; then
+                mv "$RUN_DIR/COMPLEX_modified.mol2" "$RUN_DIR/QM.mol2"
+            fi
+	    antechamber -i "$RUN_DIR/COMPLEX.pdb" -fi pdb -o "$RUN_DIR/ONE2.mol2" -fo mol2 -s 2 -rn mol -nc "$charge_total" -m "$multi_total" -at "$at_type" -dr no > "$RUN_DIR/temp.dat" 2>&1
+	    if [ -f "$RUN_DIR/ONE2.mol2" ]; then
+		    cp "$RUN_DIR/ONE2.mol2" "$RUN_DIR/QM.mol2"
+            fi
+    	else 
+        	break 
+    	fi
+    
+       	mv "$RUN_DIR/backupCOMPLEX.pdb" "$RUN_DIR/COMPLEX.pdb"
+	mv "$RUN_DIR/backupCOMPLEX.mol2" "$RUN_DIR/COMPLEX.mol2"
+    
+    	sed -i'' '$d' "$RUN_DIR/nonstand.pdb"
+    	cat "$RUN_DIR/part_QM.pdb" >> "$RUN_DIR/nonstand.pdb"
+    	cat "$RUN_DIR/part_QM.pdb" >> "$RUN_DIR/easynonstands.pdb"
+    	pdb4amber -i "$RUN_DIR/easynonstands.pdb" -o "$RUN_DIR/easyPARM.pdb"  > "$RUN_DIR/temp.dat" 2>&1 
+     
+    	input_file="$RUN_DIR/easyPARM_residues.dat"
+
+    	# Read each line from the input file
+    	while IFS=' ' read -r pdbout mol2out residue_name; do
+    	# Skip empty lines or lines starting with #
+    		if [[ -z "$pdbout" || "$pdbout" == \#* ]]; then
+        		continue
+    		fi
+    
+    	# Run the antechamber command
+    		antechamber -i "$pdbout" -fi pdb -o "$mol2out" -fo mol2 -s 2 -rn "$residue_name"  
+   	done < "$input_file" > "$RUN_DIR/temp.dat" 2>&1
+
+     
+    	if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+		python3 "$SCRIPT_DIR/update_metalloprotein_charge.py" > "$RUN_DIR/temp.dat" 2>&1
+	fi 
+    	
+	if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+		python3 "$SCRIPT_DIR/update_metalnucleicacid_charge.py" > "$RUN_DIR/temp.dat" 2>&1
+	fi 
+    	cp "$RUN_DIR/QM.mol2" "$RUN_DIR/COMPLEX.mol2"
+    	python3 "$SCRIPT_DIR/02_get_bond_angle.py" "$RUN_DIR/qm.xyz"
+    	python3 "$SCRIPT_DIR/03_correct_mol2.py" 
+    	mv "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/QM.mol2"
+    	mv "$RUN_DIR/1COMPLEX.mol2" "$RUN_DIR/COMPLEX.mol2"
+    	mv "$RUN_DIR/easyCOMPLEX.mol2" "$RUN_DIR/COMPLEX_modified.mol2" 
+    	python3 "$SCRIPT_DIR/02_get_bond_angle.py" "$RUN_DIR/$xyz_file"
+else
+    :
+fi
+
+
+# ========================= ep2 custom atom-type overrides =========================
+# Optional EP2 feature:
+#   If EP2_CUSTOM_ATOM_TYPES points to a file, or if custom_atom_types.dat exists
+#   in RUN_DIR, apply user-defined atom types to NEW_COMPLEX.mol2 before
+#   06_get_atom_type.py converts Hessian/Seminario atom-index terms into
+#   atom-type forcefield.dat entries.
+#
+# Recommended override-file format:
+#   atom_id  new_atom_type
+# Example:
+#   7        sD1
+#   9        sD2
+#
+# This preserves selected custom atom types through forcefield.dat,
+# forcefield2.dat, and the final frcmod pipeline.
+EP2_CUSTOM_ATOM_TYPES="${EP2_CUSTOM_ATOM_TYPES:-}"
+if [ -z "$EP2_CUSTOM_ATOM_TYPES" ] && [ -f "$RUN_DIR/custom_atom_types.dat" ]; then
+    EP2_CUSTOM_ATOM_TYPES="$RUN_DIR/custom_atom_types.dat"
+fi
+
+if [ -n "$EP2_CUSTOM_ATOM_TYPES" ]; then
+    if [ ! -f "$EP2_CUSTOM_ATOM_TYPES" ]; then
+        echo "Error: EP2 custom atom-type file not found: $EP2_CUSTOM_ATOM_TYPES" >&2
+        exit 1
+    fi
+    if [ ! -f "$RUN_DIR/NEW_COMPLEX.mol2" ]; then
+        echo "Error: NEW_COMPLEX.mol2 not found before custom atom-type override." >&2
+        exit 1
+    fi
+    if [ ! -f "$SCRIPT_DIR/apply_custom_atom_types.py" ]; then
+        echo "Error: apply_custom_atom_types.py not found in $SCRIPT_DIR" >&2
+        exit 1
+    fi
+
+    echo "ep2: applying custom atom types from $EP2_CUSTOM_ATOM_TYPES"
+    python3 "$SCRIPT_DIR/apply_custom_atom_types.py"         "$EP2_CUSTOM_ATOM_TYPES"         "$RUN_DIR/NEW_COMPLEX.mol2"         "$RUN_DIR/NEW_COMPLEX.mol2"         --log "$RUN_DIR/custom_atom_types_applied.tsv"
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to apply custom atom types. Exiting." >&2
+        exit 1
+    fi
+
+    snapshot_ep2_stage "00_custom_atom_types_applied"
+else
+    echo "ep2: no custom atom-type override file supplied"
+fi
+# ======================= end custom atom-type overrides ===========================
+
+# ========================= ep2 force-field stage snapshots ========================
+# ep2 change:
+#   Snapshot before and after each force-field construction script.
+#   This lets us determine exactly where raw Java-like angle constants are changed.
+snapshot_ep2_stage "00_before_06_get_atom_type"
+
+# Generate the frcmod file with all the correct info and with a clean version
+for script in 06_get_atom_type.py 07_Seminario_forcefield.py 08_update_forcefield.py 09_clean_updatedforcefield.py 10_postclean_updatedforcefield.py 11_retrieve_uffdata.py 13_final_clean.py; do
+    echo "ep2: running $script"
+    python3 "$SCRIPT_DIR/$script"
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to execute $script. Exiting."
+        exit 1
+    fi
+
+    stage_name="${script%.py}"
+    snapshot_ep2_stage "$stage_name"
+done
+
+# ======================= end ep2 force-field stage snapshots =====================
+
+# Change the name of output
+mv "$RUN_DIR/filtered_COMPLEX_modified2.frcmod" "$RUN_DIR/COMPLEX.frcmod"
+cp "$RUN_DIR/NEW_COMPLEX.mol2" "$RUN_DIR/COMPLEX.mol2"
+
+# ep2 change:
+#   Preserve the final cleaned frcmod before the empirical easyPARM scaling step.
+#   update_if_needed.py applies the same weak-force boost rules as the old AWK
+#   blocks, but does BOND and ANGLE handling in one explicit Python stage.
+cp "$RUN_DIR/COMPLEX.frcmod" "$RUN_DIR/COMPLEX.raw_before_update_if_needed.frcmod"
+snapshot_ep2_stage "14_after_final_rename_before_update_if_needed"
+
+EP2_APPLY_EASYPARM_SCALING="${EP2_APPLY_EASYPARM_SCALING:-1}"
+
+case "$EP2_APPLY_EASYPARM_SCALING" in
+    1|yes|YES|y|Y|true|TRUE)
+        if [ ! -f "$SCRIPT_DIR/update_if_needed.py" ]; then
+            echo "Error: update_if_needed.py not found in $SCRIPT_DIR" >&2
+            exit 1
+        fi
+
+        python3 "$SCRIPT_DIR/update_if_needed.py" "$RUN_DIR/COMPLEX.frcmod"             > "$RUN_DIR/update_if_needed.log" 2>&1
+
+        if [ $? -ne 0 ]; then
+            echo "Failed to execute update_if_needed.py. Exiting." >&2
+            cat "$RUN_DIR/update_if_needed.log" >&2
+            exit 1
+        fi
+
+        snapshot_ep2_stage "15_after_update_if_needed_scaling"
+        ;;
+    0|no|NO|n|N|false|FALSE)
+        echo "ep2: easyPARM empirical weak-force scaling disabled"
+        snapshot_ep2_stage "15_update_if_needed_scaling_disabled"
+        ;;
+    *)
+        echo "Error: invalid EP2_APPLY_EASYPARM_SCALING=$EP2_APPLY_EASYPARM_SCALING" >&2
+        echo "Use 1/0, yes/no, true/false." >&2
+        exit 1
+        ;;
+esac
+
+
+# ep2 change:
+# If custom atom types were supplied, create minimal.frcmod containing only
+# entries that mention the custom atom types. Comments in minimal.frcmod are
+# reduced to atoms= and ep2_source= only.
+if [ -n "${EP2_CUSTOM_ATOM_TYPES:-}" ]; then
+    if [ -f "$SCRIPT_DIR/extract_minimal_frcmod.py" ] && [ -f "$RUN_DIR/COMPLEX.frcmod" ]; then
+        echo "ep2: generating minimal.frcmod for custom atom types"
+        python3 "$SCRIPT_DIR/extract_minimal_frcmod.py" \
+            --custom-types "$EP2_CUSTOM_ATOM_TYPES" \
+            --frcmod "$RUN_DIR/COMPLEX.frcmod" \
+            --output "$RUN_DIR/minimal.frcmod" \
+            > "$RUN_DIR/minimal_frcmod.log" 2>&1
+
+        if [ $? -ne 0 ]; then
+            echo "Failed to generate minimal.frcmod. See $RUN_DIR/minimal_frcmod.log" >&2
+            cat "$RUN_DIR/minimal_frcmod.log" >&2
+            exit 1
+        fi
+
+        snapshot_ep2_stage "16_after_minimal_frcmod"
+    else
+        echo "ep2: minimal.frcmod skipped: extract_minimal_frcmod.py or COMPLEX.frcmod not found" >&2
+    fi
+fi
+
+# Function to process metalloprotein parameters (frcmod)
+process_metalloprotein_parm() {
+    local protein_ff=$1
+    
+    if [ ! -f "$SCRIPT_DIR/metalloprotein_parm.py" ]; then
+        echo "Error: metalloprotein_parm.py not found in $SCRIPT_DIR" >&2
+        return 1
+    fi
+    
+    case "$protein_ff" in
+        1) frcmod_file="fb15.frcmod" ;;
+        2) frcmod_file="ff12SB.frcmod" ;;
+        3) frcmod_file="ff14SB.frcmod" ;;
+        4) frcmod_file="ff19SB.frcmod" ;;
+        *) 
+            echo "Error: Invalid protein force field selection: $protein_ff" >&2
+            echo "Valid options are 1-4" >&2
+            return 1
+            ;;
+    esac
+    
+    python3 "$SCRIPT_DIR/metalloprotein_parm.py" "$SCRIPT_DIR/libraries/$frcmod_file" > "$RUN_DIR/temp.dat" 2>&1
+}
+
+# Function to process metallonucleic parameters (frcmod)
+process_metallonucleic_parm() {
+    local nucleic_ff=$1
+    
+    if [ ! -f "$SCRIPT_DIR/metalloprotein_parm.py" ]; then
+        echo "Error: metalloprotein_parm.py not found in $SCRIPT_DIR" >&2
+        return 1
+    fi
+    
+    case "$nucleic_ff" in
+        1) frcmod_file="DNA_BSC0.frcmod" ;;
+        2) frcmod_file="DNA_BSC1.frcmod" ;;
+        3) frcmod_file="DNA_OL15.frcmod" ;;
+        4) frcmod_file="DNA_OL21.frcmod" ;;
+        5) frcmod_file="DNA_OL24.frcmod" ;;
+        6) frcmod_file="RNA_OL3.frcmod" ;;
+        *) 
+            echo "Error: Invalid nucleic force field selection: $nucleic_ff" >&2
+            echo "Valid options are 1-6" >&2
+            return 1
+            ;;
+    esac
+    
+    python3 "$SCRIPT_DIR/metalloprotein_parm.py" "$SCRIPT_DIR/libraries/$frcmod_file" > "$RUN_DIR/temp.dat" 2>&1
+}
+
+resid_ID=$(get_valid_input "Would you like to change the residue ID (Default= mol)? (y/n): " "y n yes no Y N YES NO Yes No")
+if [[ "${resid_ID,,}" =~ ^(y|yes)$ ]]; then
+    read -r -p "Please provide the residue name: " resid_name
+fi
+
+if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]] || [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+
+    
+    if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+	    process_metalloprotein_parm "$protein_ff" 
+	    mv "$RUN_DIR/nonstand.pdb" "$RUN_DIR/easyPARM_MetalloProtein.pdb"
+	    pdb4amber -i "$RUN_DIR/easyPARM_MetalloProtein.pdb" -o "$RUN_DIR/easyPARM_MetalloProtein2.pdb"  > "$RUN_DIR/temp.dat" 2>&1 
+	    mv "$RUN_DIR/easyPARM_MetalloProtein2.pdb" "$RUN_DIR/easyPARM_MetalloProtein.pdb" 
+    fi
+    if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+	    process_metallonucleic_parm "$nucleic_ff" 
+
+	    mv "$RUN_DIR/nonstand.pdb" "$RUN_DIR/easyPARM_MetalloNucleic.pdb"
+	    pdb4amber -i "$RUN_DIR/easyPARM_MetalloNucleic.pdb" -o "$RUN_DIR/easyPARM_MetalloNucleic2.pdb"  > "$RUN_DIR/temp.dat" 2>&1 
+	    mv "$RUN_DIR/easyPARM_MetalloNucleic2.pdb" "$RUN_DIR/easyPARM_MetalloNucleic.pdb" 
+    fi 
+    
+    mv "$RUN_DIR/QM.mol2" "$RUN_DIR/METAL.mol2"
+    mv "$RUN_DIR/coordinated_residues.txt" "$RUN_DIR/Bond_Info.dat"
+    echo "  "
+    
+
+    echo "=========================================="
+    echo "         	Output Files "
+    echo "=========================================="
+
+    input_file="$RUN_DIR/easyPARM_residues.dat"
+    line_number=1
+
+# Read each line from the input file
+    while IFS=' ' read -r pdbout mol2out residue_name; do
+    	# Skip empty lines or lines starting with #
+    	if [[ -z "$mol2out" || "$pdbout" == \#* ]]; then
+        	continue
+    	fi	
+    
+    # Print the mol2out with the line number
+    	echo "Mol2 $line_number			  : $mol2out"
+    	((line_number++))
+    done < "$input_file" 
+    if [[ "${resid_ID,,}" =~ ^(y|yes)$ ]]; then
+	    cp "$RUN_DIR/COMPLEX.frcmod" "$RUN_DIR/COMPLEX_${resid_name}.frcmod"
+	    #mv "$RUN_DIR/COMPLEX.frcmod" "$RUN_DIR/easyPARM.frcmod"
+	    mv "$RUN_DIR/Bond_Info.dat" "$RUN_DIR/Bond_Info_${resid_name}.dat" 
+	    mv "$RUN_DIR/Hybridization_Info.dat" "$RUN_DIR/Hybridization_Info_${resid_name}.dat"
+	    if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+		    mv "$RUN_DIR/easyPARM_MetalloProtein.pdb" "$RUN_DIR/easyPARM_MetalloProtein_${resid_name}.pdb"
+		    sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/easyPARM_MetalloProtein_${resid_name}.pdb"
+	    fi
+	    if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+	    	mv "$RUN_DIR/easyPARM_MetalloNucleic.pdb" "$RUN_DIR/easyPARM_MetalloNucleic_${resid_name}.pdb"
+		sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/easyPARM_MetalloNucleic_${resid_name}.pdb"
+	    fi
+	    cp "$RUN_DIR/METAL.mol2" "$RUN_DIR/${resid_name}.mol2"
+	    sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/${resid_name}.mol2"
+
+	    echo "Mol2  		    	  : ${resid_name}.mol2"
+	    echo "Frcmod                    : COMPLEX_${resid_name}.frcmod"
+	    echo "Bond Information          : Bond_Info_${resid_name}.dat"
+	    echo "Lib    		    	  : COMPLEX.lib"
+	    echo "New Atom Type             : Hybridization_Info_${resid_name}.dat"
+	    if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]]; then
+		    echo "MetalloProtein pdb        : easyPARM_MetalloProtein_${resid_name}.pdb"
+	    fi
+	    if [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+		    echo "MetalloProtein pdb        : easyPARM_MetalloNucleic_${resid_name}.pdb"
+	    fi
+    else
+	    echo "Mol2                          : METAL.mol2"
+	    echo "Bond Information        	: Bond_Info.dat"
+	    echo "Frcmod                  	: COMPLEX.frcmod"
+	    echo "New Atom Type           	: Hybridization_Info.dat"
+	    echo "Lib    			: COMPLEX.lib"
+	    echo "MetalloProtein pdb        	: easyPARM_MetalloProtein.pdb"
+    fi
+else 
+    	if [[ "${resid_ID,,}" =~ ^(y|yes)$ ]]; then
+	    #sed -i  -E "s/ mol /${resid_name}/g" "$RUN_DIR/COMPLEX.mol2"
+	    	sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/COMPLEX.mol2"
+	    	sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/COMPLEX.pdb"
+    	fi
+
+# Print all the output name
+	echo "================================="
+	echo "         Output Files "
+	echo "================================="
+	echo "Mol2   		: COMPLEX.mol2"
+	echo "Frcmod 		: COMPLEX.frcmod"
+	echo "PDB    		: COMPLEX.pdb"
+	echo "Lib    		: COMPLEX.lib"
+    	echo "New Atom Type	: Hybridization_Info.dat"
+
+fi	
+
+if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]] || [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+        # run for only the small residue 
+	python3 "$SCRIPT_DIR/02_get_bond_angle.py" "$RUN_DIR/part_QM.xyz"
+
+	# Prepare library input for tleap
+	echo "source leaprc.gaff" > input_library.tleap
+	echo "loadamberparams COMPLEX.frcmod" >> input_library.tleap
+	echo "mol = loadmol2 METAL.mol2" >> input_library.tleap
+	echo "check mol" >> input_library.tleap
+	echo "charge mol" >> input_library.tleap
+	echo "savepdb mol COMPLEX.pdb" >> input_library.tleap
+	echo "saveoff mol COMPLEX.lib" >> input_library.tleap
+	echo "quit" >> input_library.tleap
+	tleap -f input_library.tleap > leap.log
+	tleap -f ALL_RESIDUE_tleap.input > leap.log
+
+	#Function to correct lib file
+	python3 "$SCRIPT_DIR/12_generate_lib.py" > "$RUN_DIR/temp.dat" 2>&1 
+	
+	if [[ "${resid_ID,,}" =~ ^(y|yes)$ ]]; then 
+		sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/COMPLEX.lib"
+		rm "$RUN_DIR/COMPLEX.frcmod"
+		rm "$RUN_DIR/METAL.mol2"
+	fi
+else 
+	echo "source leaprc.gaff" > input_library.tleap
+	echo "loadamberparams COMPLEX.frcmod" >> input_library.tleap
+	echo "mol = loadmol2 "COMPLEX.mol2"" >> input_library.tleap
+	echo "check mol" >> input_library.tleap
+	echo "charge mol" >> input_library.tleap
+	echo "savepdb mol COMPLEX.pdb" >> input_library.tleap
+	echo "saveoff mol COMPLEX.lib" >> input_library.tleap
+	echo "quit" >> input_library.tleap
+
+	#Function to correct lib file
+	tleap -f input_library.tleap > leap.log
+
+	python3 "$SCRIPT_DIR/12_generate_lib.py" > "$RUN_DIR/temp.dat" 2>&1
+	if [[ "${resid_ID,,}" =~ ^(y|yes)$ ]]; then 
+		sed -i'' "s/\<mol\>/${resid_name}/g" "$RUN_DIR/COMPLEX.lib"
+	fi
+
+fi
+
+echo " "
+charmm_FF=$(get_valid_input "Would you like to generate the CHARMM force field format? (y/n): " "y n yes no Y N YES NO Yes No")
+if [[ "${charmm_FF,,}" =~ ^(y|yes)$ ]] && [[ "${metalloprotein_choice,,}" =~ ^(n|no)$ ]] ; then
+	python3 "$SCRIPT_DIR/str_helper.py" > "$RUN_DIR/temp.dat" 2>&1 
+	python3 "$SCRIPT_DIR/generate_str.py" "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/forcefield.dat" > "$RUN_DIR/COMPLEX.top"  
+	python3 "$SCRIPT_DIR/assign_amber_charmm.py" > "$RUN_DIR/temp.dat" 2>&1 
+
+	echo " "
+	echo "================================="
+	echo "      CHARMM Output Files "
+	echo "================================="
+	echo "Force Field 	: COMPLEX.prm"
+	echo "PDB    		: COMPLEX.pdb"
+	echo "Topology     	: COMPLEX.top"
+
+fi
+
+
+if [[ "${metalloprotein_choice,,}" =~ ^(y|yes)$ ]] || [[ "${metallonucleic_choice,,}" =~ ^(y|yes)$ ]]; then
+	rm -f COMPLEX.mol2
+	rm -f COMPLEX.pdb	
+	rm -f metalloprotein_easyPARM_*
+	rm -f metallonucleic_easyPARM_*
+	rm -f *_renum.txt
+	rm -f *_sslink
+	rm -f *_nonprot.pdb
+	rm -f charge_*.dat
+	rm -f recalculated_charges.dat
+	rm -f processed_charges.dat
+	rm -f original_charges.dat
+	rm -f coordination_analysis.txt
+	rm -f charge_statistics.txt	
+	rm -f fixed_charges.dat
+		
+fi
+# Remove the unnecessary file
+rm ANTECHAMBER*
+files_to_remove=("dihedral.dat" "distance.dat" "esout" "atom_type.dat" "COMPLEX_modified.mol2" "COMPLEX_modified.frcmod" \
+    "complex.fchk" "forcefield2.dat" "metal_number.dat" "temp_COMPLEX_modified.frcmod" "new_atomtype.dat" \
+    "temp.dat" "updated_COMPLEX_modified.frcmod" "updated_COMPLEX_modified2.frcmod" "angle.dat" "new_atomtype1.dat"\
+    "qout" "punch" "QOUT" "ATOMTYPE.INF" "leap.log" "updated_updated_COMPLEX_modified2.frcmod" "metals_complete.dat" "more_metal.dat" "new_atomtype2.dat" "REF_COMPLEX.mol2" "limited_data.dat" "mol.pdb" "line_number.dat" "ONE.mol2" "Reference_atom_type.dat" "REFQM.pdb" "NEW_COMPLEX.mol2"\
+    "QM.pdb" "nonstand.pdb" "part_QM.xyz" "part_QM.pdb" "charge_qm.dat" "metalloprotein.pdb" "metalloprotein_easyPARM.pdb" "charges_all.dat" "easynonstands.pdb" "easyPARM.pdb" "easyPARM_residues.dat" "reference_structure.xyz" "ALL_RESIDUE_tleap.input" "ZEMA.mol2" "easyPARM_atomtype.dat" "easyPARM.mol2" "COMREF.mol2" "COMPLEX.frcmod.bak" "metalloprotein_atomtype.dat" ) 
+
+for file in "${files_to_remove[@]}"; do
+    if [ -e "$file" ]; then
+        rm -f "$file"
+	
+    fi
+done
+
+# Function to check and report low force constants
+check_force_constants() {
+    local frcmod_file="$1"
+    local low_constants=$(awk '
+    /^BOND/,/^ANGLE/ {
+        if ($2 ~ /[0-9]/ && $2 < 20) {
+            print $1 " has force constant " $2
+        }
+    }' "$frcmod_file")
+    
+    if [ -n "$low_constants" ]; then
+        echo "========================================================================="
+        echo -e "\n\033[0;31mAbnormally low bond force constants detected!\033[0m"
+        echo "========================================================================="
+        echo "$low_constants"
+        echo -e "\n\033[0;31mThis indicates severely stretched bonds in your structure.\033[0m"
+        echo -e "\n\033[0;31mCheck your geometry optimization and level of theory before proceeding.\033[0m"
+        echo "========================================================================="
+        echo ""
+    fi
+}
+
+# Main logic
+if [[ "${resid_ID,,}" =~ ^(y|yes)$ ]]; then
+    frcmod_file="$RUN_DIR/COMPLEX_${resid_name}.frcmod"
+else
+    frcmod_file="$RUN_DIR/COMPLEX.frcmod"
+fi
+
+check_force_constants "$frcmod_file"
+
+# Ask if the user wants to restrain the charge on specific atoms
+echo "  "
+restrain_choice=$(get_valid_input "Would you like to restrain the charge on specific atoms? (y/n): " "y n yes no Y N YES NO Yes No")
+if [[ "${restrain_choice,,}" =~ ^(y|yes)$ ]]; then
+    echo " "
+    echo "========================================================================"
+    echo "                           Restrain Method "
+    echo "========================================================================"
+    while true; do
+	echo "  "
+        num_atoms=$(get_valid_input "How many atoms do you want to restrain? " "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 ")
+        
+        if [[ "$num_atoms" -lt 1 ]]; then
+            echo "Error: The number of atoms to restrain must be at least 1. Please try again."
+            continue
+        fi
+
+        > "$RUN_DIR/restraint_info.dat"  # Initialize the file to be empty
+
+        for (( i=1; i<=num_atoms; i++ ))
+        do
+            while true; do
+                echo " "
+                read -p "Please provide the atom number and its charge for atom $i (e.g., 12 -0.834): " atom_number charge
+
+                # Validate input
+                if [[ ! "$atom_number" =~ ^[0-9]+$ ]] || [[ ! "$charge" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                    echo "Error: Invalid input. Atom number must be an integer and charge must be a number."
+                    continue
+                fi
+
+                echo "$atom_number $charge" >> "$RUN_DIR/restraint_info.dat"
+                break
+            done
+        done
+
+        # Ask if the user wants to review or redo the restraints
+	echo " "
+        read -p "Do you want to review the restraints? (y/n): " review_choice
+        if [[ "$review_choice" =~ ^[Yy]$ ]]; then
+            cat "$RUN_DIR/restraint_info.dat"
+	    echo " "
+            read -p "Do you want to redo the restraints? (y/n): " redo_choice
+            if [[ "$redo_choice" =~ ^[Yy]$ ]]; then
+                continue
+            fi
+        fi
+
+        break
+    done
+    # Ask the user for the charge output
+    while true; do
+	echo " "
+        
+	read -p "Please enter the name of output that contains all the ESP charges: " ESP_FILE
+        
+        # Check if the file has an accepted extension
+        if [[ ! "$ESP_FILE" =~ \.(vpot|log|out|dat)$ ]]; then
+            echo "Error: The file must have a .log or .dat or .vpot extension. Please try again."
+            continue
+        fi
+        
+        # Check if the ESP file exists
+        if [ ! -f "$RUN_DIR/$ESP_FILE" ]; then
+            echo "Error: The Gaussian file '$ESP_FILE' was not found in $RUN_DIR. Please check the file name and try again."
+            continue
+        fi
+        
+        break  # Exit the loop if the file exists and has a valid extension
+    done
+
+    file_name="esp.dat"
+
+    if [ -f "$file_name" ]; then
+    	rm "$file_name"
+    fi 
+    # Extract the file extension
+    extension="${ESP_FILE##*.}"
+
+    # Check the extension and set qm_output
+    if [ "$extension" = "log" ]; then
+    	qm_output=2
+    elif [ "$extension" = "vpot" ]; then
+    	qm_output=1
+    elif [ "$extension" = "dat" ]; then
+    	qm_output=3
+    else
+    	echo "Error: Unrecognized file extension: .$extension"
+    	exit 1
+    fi
+    
+    if [ "$qm_output" -eq 1 ]; then
+        # For ORCA log file, simply copy the file
+        cp "$RUN_DIR/$ESP_FILE" "$RUN_DIR/esp.dat"
+	# Read the first line, remove the space, and store it
+        first_line=$(sed '1q;d' "$RUN_DIR/esp.dat" | sed -E 's/^([[:space:]]+)([0-9]+)[[:space:]]+([0-9]+)/\1\2\3/')
+# Replace the first line in the file
+        sed -i'' "1s/.*/$first_line/" "$RUN_DIR/esp.dat"
+          
+	i=$(wc -l < "$RUN_DIR/atomic_number.dat")
+
+    elif [ "$qm_output" -eq 2 ] ; then
+        # Extract relevant data from the output for gaussian
+        grep "Atomic Center " "$RUN_DIR/$ESP_FILE" > "$RUN_DIR/a"
+        grep "ESP Fit" "$RUN_DIR/$ESP_FILE" > "$RUN_DIR/b"
+        grep "Fit    " "$RUN_DIR/$ESP_FILE" > "$RUN_DIR/c"
+
+        # Detect the number of atoms
+        i=$(wc -l < "$RUN_DIR/a")
+
+        # Ensure the readit binary is in the script directory and is executable
+        if [ ! -x "$SCRIPT_DIR/readit" ]; then
+            echo "Error: readit binary not found or not executable in $SCRIPT_DIR"
+            exit 1
+        fi
+
+        # Run the readit binary
+        (cd "$RUN_DIR" && "$SCRIPT_DIR/readit")
+
+    elif [ "$qm_output" -eq 3 ] ; then
+        # For GAMESS dat file, prepare resp files
+        python3 "$SCRIPT_DIR/RESP_GAMESS.py" "$RUN_DIR/$ESP_FILE" $charge_total "$RUN_DIR/similar.dat" > "$RUN_DIR/temp.dat"
+	cp "$RUN_DIR/esp.in" "$RUN_DIR/esp.dat"
+	i=$(wc -l < "$RUN_DIR/atomic_number.dat")
+
+    else
+        exit 1
+    fi
+
+if [ "$qm_output" = "1" ] || [ "$qm_output" = "3" ]; then    
+    echo "floBF-resp run #1" > complex_esp.in
+    echo " &cntrl" >> complex_esp.in 
+    echo " nmol=1," >> complex_esp.in
+    echo " ihfree=1," >> complex_esp.in
+    echo " qwt=0.0005," >> complex_esp.in
+    echo " iqopt=2," >> complex_esp.in
+    echo " /" >> complex_esp.in
+    echo "    1.0" >> complex_esp.in
+    echo "Complex" >> complex_esp.in
+    echo "   $charge_total   $i" >> complex_esp.in
+    OUTPUT_FILE=complex_esp.in
+    # Read the atom numbers and charges from restrain into
+    declare -A restrained_atoms
+    while read -r atom_number charge; do
+       restrained_atoms[$atom_number]=$charge
+    done < "$RUN_DIR/restraint_info.dat"
+    # Read the similar.dat file to organize atoms with similar chemical environments
+    declare -A atom_types
+    while read -r atom_number atom_type; do
+        atom_types[$atom_number]=$atom_type
+    done < "$RUN_DIR/similar.dat"
+    # Convert arrays to space-separated lists
+    restrained_atoms_list=$(for key in "${!restrained_atoms[@]}"; do echo "$key ${restrained_atoms[$key]}"; done)
+    atom_types_list=$(for key in "${!atom_types[@]}"; do echo "$key ${atom_types[$key]}"; done)
+    # Process the atomic numbers and add them to complex_esp.in
+    awk -v OFILE="$OUTPUT_FILE" -v restrained_atoms_list="$restrained_atoms_list" -v atom_types_list="$atom_types_list" '
+    BEGIN {
+        # Populate associative arrays in awk
+        split(restrained_atoms_list, restrained_array, " ")
+        for (i in restrained_array) {
+            restrained_atoms[restrained_array[i]] = 1
+        }
+        split(atom_types_list, atom_types_array, " ")
+        for (i = 1; i <= length(atom_types_array); i+=2) {
+            atom_types[atom_types_array[i]] = atom_types_array[i+1]
+        }
+    }
+    {
+        atom_num = NR
+        atomic_number = $1
+        if (atom_num in restrained_atoms) {
+            atom_type = -1
+        } else if (atom_num in atom_types) {
+            atom_type = atom_types[atom_num]
+        } else {
+            atom_type = 0
+        }
+        printf "%3d%4d\n", atomic_number, atom_type >> OFILE
+    }
+    ' atomic_number.dat
+    echo " " >> complex_esp.in
+    echo " " >> complex_esp.in
+
+elif [ "$qm_output" = "2" ] ; then
+    # Generate the required input for resp
+    echo "floBF-resp run #1" > complex_esp.in
+    echo " &cntrl" >> complex_esp.in 
+    echo " nmol=1," >> complex_esp.in
+    echo " ihfree=1," >> complex_esp.in
+    echo " qwt=0.0005," >> complex_esp.in
+    echo " iqopt=2," >> complex_esp.in
+    echo " /" >> complex_esp.in
+    echo "    1.0" >> complex_esp.in
+    echo "Complex" >> complex_esp.in
+    echo "   $charge_total   $i" >> complex_esp.in
+    OUTPUT_FILE=complex_esp.in
+    # Read the atom numbers and charges from restrain into
+    declare -A restrained_atoms
+    while read -r atom_number charge; do
+        restrained_atoms[$atom_number]=$charge
+    done < "$RUN_DIR/restraint_info.dat"
+    # Read the similar.dat file to organize atoms with similar chemical environments
+    declare -A atom_types
+    while read -r atom_number atom_type; do
+        atom_types[$atom_number]=$atom_type
+    done < "$RUN_DIR/similar.dat"
+    # Convert arrays to space-separated lists
+    restrained_atoms_list=$(for key in "${!restrained_atoms[@]}"; do echo "$key ${restrained_atoms[$key]}"; done)
+    atom_types_list=$(for key in "${!atom_types[@]}"; do echo "$key ${atom_types[$key]}"; done)
+    # Extract and process the data related to atomic number, total charge, atom id
+    awk -v i="$i" -v OFILE="$OUTPUT_FILE" -v restrained_atoms_list="$restrained_atoms_list" -v atom_types_list="$atom_types_list" '
+    BEGIN {
+        start = 0
+        # Populate associative arrays in awk
+        split(restrained_atoms_list, restrained_array, " ")
+        for (i in restrained_array) {
+            restrained_atoms[restrained_array[i]] = 1
+        }
+        split(atom_types_list, atom_types_array, " ")
+        for (i = 1; i <= length(atom_types_array); i+=2) {
+            atom_types[atom_types_array[i]] = atom_types_array[i+1]
+        }
+    }
+    /Standard orientation:/ { 
+        start = 1
+        getline; getline; getline; getline  # Skip 4 lines after "Standard orientation:"
+        next
+    }
+    start && NF == 6 && $1 ~ /^[0-9]+$/ {
+        atom_num = $1
+        atom_type = $3
+        if (atom_num in restrained_atoms) {
+            atom_type = -1
+        } else if (atom_num in atom_types) {
+            atom_type = atom_types[atom_num]
+        }
+        printf "%3d%4d\n", $2, atom_type >> OFILE
+    }
+    /^---------------------------------------------------------------------$/ && start {
+        exit
+    }
+    ' "$RUN_DIR/$ESP_FILE"
+    
+    echo " " >> complex_esp.in
+    echo " " >> complex_esp.in
+else
+    exit 1
+fi
+    # Fill the input with the correct info about the charge
+    awk -v lines="$i" 'BEGIN {
+        cols = 8;  # Number of columns per line
+        for (n = 1; n <= lines; n++) {
+            printf "0.000000";
+            if (n % cols == 0) {
+                print "";  # New line after every 8th column
+            } else if (n < lines) {
+                printf "  ";  # Two spaces between charges
+            }
+        }
+        if (lines % cols != 0) {
+            print "";  # New line if last line has less than 8 columns
+        }
+    }' > "$RUN_DIR/complex_esp.qin"
+
+    # Update complex_esp.qin by replacing the correct positions with their corresponding charges
+    awk -v input="$RUN_DIR/restraint_info.dat" -v cols=8 -v total="$i" '
+    BEGIN {
+        # Initialize charges array with default zeros
+        for (n = 1; n <= total; n++) {
+            charges[n] = "0.000000";
+        }
+
+        # Replace the values at specific positions with the charges from restraint_info.dat
+        while ((getline < input) > 0) {
+            atom_number = $1;
+            charge = sprintf("%.6f", $2);
+            if (atom_number > 0 && atom_number <= total) {
+                charges[atom_number] = charge;
+            }
+        }
+
+        # Print the charges distributed across multiple lines with 8 columns
+        for (n = 1; n <= total; n++) {
+            printf "%s", charges[n];
+            if (n % cols == 0) {
+                print "";  # New line after every 8th column
+            } else if (n < total) {
+                printf "  ";  # Two spaces between charges
+            }
+        }
+        if (total % cols != 0) {
+            print "";  # New line if last line has less than 8 columns
+        }
+    }' > "$RUN_DIR/tmpfile" && mv "$RUN_DIR/tmpfile" "$RUN_DIR/complex_esp.qin"
+    # Excute the resp from ambertools
+    resp -O -i complex_esp.in -o complex_esp.out -p complex_esp.pch -t complex_esp.chg -q complex_esp.qin -e esp.dat
+ 
+    #Generate copies for the files 
+    cp COMPLEX.mol2 oldCOMPLEX.mol2
+    cp COMPLEX.lib  oldCOMPLEX.lib
+
+    # Reshape the charges in complex_esp.chg to be one column and save to charges.dat
+    awk '{for (i=1; i<=NF; i++) print $i}' "$RUN_DIR/complex_esp.chg" > "$RUN_DIR/charges.chg"
+
+    # Replace the charges in COMPLEX_charged.mol2 with those from charges.dat
+    python3 "$SCRIPT_DIR/Retrieve_RESP_Charges.py"
+    
+    cp "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/COMPLEX_charged.mol2"
+ 
+    tleap -f input_library.tleap > leap.log
+
+    #Function to correct lib file
+    python3 "$SCRIPT_DIR/12_generate_lib.py" > "$RUN_DIR/temp.dat" 2>&1
+    
+    #Generate the correct fixed and not fixed charges
+    if [[ "${charmm_FF,,}" =~ ^(y|yes)$ ]] && [[ "${metalloprotein_choice,,}" =~ ^(n|no)$ ]] ; then
+	    python3 "$SCRIPT_DIR/generate_str.py" "$RUN_DIR/COMPLEX.mol2" "$RUN_DIR/forcefield.dat" > "$RUN_DIR/COMPLEX_charged.top" 
+	    echo " "
+	    echo "Charges updated in COMPLEX_charged.top"
+	    echo " "
+    else
+	    cp "$RUN_DIR/COMPLEX.lib" "$RUN_DIR/COMPLEX_charged.lib"
+	    cp "$RUN_DIR/oldCOMPLEX.mol2" "$RUN_DIR/COMPLEX.mol2"
+	    cp "$RUN_DIR/oldCOMPLEX.lib" "$RUN_DIR/COMPLEX.lib"
+	    # Print output name
+	    echo " "
+	    echo "Charges updated in COMPLEX_charged.mol2"
+	    echo "lib file updated in COMPLEX_charged.lib"
+	    echo " "
+    fi
+	   
+
+    # Clean up temporary files
+    rm -f "$RUN_DIR/a" "$RUN_DIR/b" "$RUN_DIR/c" "$RUN_DIR/tmpfile" complex_esp.in complex_esp.out complex_esp.qin complex_esp.chg complex_esp.pch esp.dat charges.dat restraint_info.dat oldCOMPLEX.mol2 oldCOMPLEX.lib leap.log
+else
+    echo "No charge restraints applied. Exiting."
+
+fi
+
+files_to_remove=( "similar.dat" "input_library.tleap" "distance_type.dat" "tempz.fchk" "atomic_number.dat" "charges.dat"  "bond_angle_dihedral_data.dat" "forcefield.dat" "ONE2.mol2" "psi4.config" "charges.chg" "qm.pdb" "qm.xyz" "esp.chg" "resp.out" "esp.in" "resp.in" "nucleic_acid_easyPARM.pdb" )
+
+for file in "${files_to_remove[@]}"; do
+    if [ -e "$file" ]; then
+        rm -f "$file"
+    fi
+done
+
+echo " "
+echo -n "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"
+echo -e "\n\033[1;36m🏁 Crossed the finish line successfully! 🏁\033[0m"
+echo "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"
